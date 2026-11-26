@@ -1,0 +1,974 @@
+# Eclips AI (тестовая версия, без backend) — всё в одном файле.
+# Положить как .github/workflows/eclips-ai.yml
+# Ключ OpenRouter вписан прямо в файл (только для теста; репозиторий лучше сделать приватным).
+# Необязательный секрет GROQ_API_KEY: если добавить, Groq станет основным, OpenRouter резервным.
+# Запуск: Actions → Eclips AI → Run workflow
+name: Eclips AI
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      OPENROUTER_API_KEY: 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
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+    steps:
+      - name: Проверка ключей
+        run: |
+          if [ -z "$OPENROUTER_API_KEY" ] && [ -z "$GROQ_API_KEY" ]; then
+            echo "::error::Добавьте секрет OPENROUTER_API_KEY (Settings → Secrets and variables → Actions)"
+            exit 1
+          fi
+
+      - name: Создание файлов приложения
+        run: |
+          cat > package.json <<'EOF_FILE'
+          {
+            "name": "eclips-ai",
+            "version": "1.0.0",
+            "main": "node_modules/expo/AppEntry.js",
+            "scripts": {
+              "start": "expo start"
+            },
+            "dependencies": {
+              "@react-native-async-storage/async-storage": "1.23.1",
+              "@react-native-community/netinfo": "11.4.1",
+              "expo": "~52.0.0",
+              "expo-asset": "~11.0.5",
+              "expo-clipboard": "~7.0.0",
+              "expo-constants": "~17.0.0",
+              "expo-font": "~13.0.4",
+              "expo-linear-gradient": "~14.0.0",
+              "expo-status-bar": "~2.0.0",
+              "react": "18.3.1",
+              "react-native": "0.76.9",
+              "react-native-safe-area-context": "4.12.0",
+              "react-native-svg": "15.8.0"
+            }
+          }
+          EOF_FILE
+          cat > app.config.js <<'EOF_FILE'
+          module.exports = ({ config }) => ({
+            ...config,
+            name: 'Eclips AI',
+            slug: 'eclips-ai',
+            version: '1.0.0',
+            orientation: 'portrait',
+            userInterfaceStyle: 'dark',
+            backgroundColor: '#0B1220',
+            android: { package: 'com.eclips.ai', versionCode: 1 },
+            extra: { groqKey: process.env.GROQ_API_KEY || '', openrouterKey: process.env.OPENROUTER_API_KEY || '' },
+          });
+          EOF_FILE
+          cat > App.js <<'EOF_FILE'
+          import React, { useEffect, useRef, useState } from 'react';
+          import {
+            View, Text, TextInput, TouchableOpacity, FlatList, Modal, KeyboardAvoidingView,
+            Platform, Alert, StyleSheet, ActivityIndicator, Linking,
+          } from 'react-native';
+          import AsyncStorage from '@react-native-async-storage/async-storage';
+          import * as Clipboard from 'expo-clipboard';
+          import Constants from 'expo-constants';
+          import { fetch as expoFetch } from 'expo/fetch';
+          import NetInfo from '@react-native-community/netinfo';
+          import { LinearGradient } from 'expo-linear-gradient';
+          import Svg, { Path, Circle, Rect, Line, Polyline } from 'react-native-svg';
+
+          import { StatusBar } from 'expo-status-bar';
+          import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+
+          // Иконки нарисованы через SVG: не зависят от шрифтов и работают в release-APK
+          const ICONS = {
+            'menu': c => <><Path d="M4 6h16M4 12h16M4 18h16" /></>,
+            'settings-outline': c => <><Circle cx="12" cy="12" r="3" /><Path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" /></>,
+            'cloud-offline-outline': c => <><Path d="M22.61 16.95A5 5 0 0 0 18 10h-1.26a8 8 0 0 0-7.05-6M5 5a8 8 0 0 0 4 15h9a5 5 0 0 0 1.7-.3" /><Line x1="1" y1="1" x2="23" y2="23" /></>,
+            'copy-outline': c => <><Rect x="9" y="9" width="13" height="13" rx="2" /><Path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></>,
+            'refresh': c => <><Polyline points="23 4 23 10 17 10" /><Path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></>,
+            'stop': c => <><Rect x="6" y="6" width="12" height="12" rx="2.5" fill={c} stroke="none" /></>,
+            'arrow-up': c => <><Line x1="12" y1="19" x2="12" y2="5" /><Polyline points="5 12 12 5 19 12" /></>,
+            'add': c => <><Path d="M12 5v14M5 12h14" /></>,
+            'search': c => <><Circle cx="11" cy="11" r="8" /><Line x1="21" y1="21" x2="16.65" y2="16.65" /></>,
+            'close-circle': c => <><Circle cx="12" cy="12" r="10" /><Path d="M15 9l-6 6M9 9l6 6" /></>,
+            'chatbubble-ellipses-outline': c => <><Path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" /><Circle cx="8.5" cy="12" r="1" fill={c} stroke="none" /><Circle cx="12" cy="12" r="1" fill={c} stroke="none" /><Circle cx="15.5" cy="12" r="1" fill={c} stroke="none" /></>,
+            'pin-outline': c => <><Path d="M12 17v5" /><Path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></>,
+            'pin': c => <><Path d="M12 17v5" /><Path fill={c} d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></>,
+            'pencil': c => <><Path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" /></>,
+            'trash-outline': c => <><Polyline points="3 6 5 6 21 6" /><Path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /><Line x1="10" y1="11" x2="10" y2="17" /><Line x1="14" y1="11" x2="14" y2="17" /></>,
+            'finger-print': c => <><Path d="M12 10a2 2 0 0 0-2 2c0 1.02-.1 2.51-.26 4" /><Path d="M14 13.12c0 2.38 0 6.38-1 8.88" /><Path d="M17.29 21.02c.12-.6.43-2.3.5-3.02" /><Path d="M2 12a10 10 0 0 1 18-6" /><Path d="M21.8 16c.2-2 .131-5.354 0-6" /><Path d="M5 19.5C5.5 18 6 15 6 12a6 6 0 0 1 .34-2" /><Path d="M8.65 22c.21-.66.45-1.32.57-2" /><Path d="M9 6.8a6 6 0 0 1 9 5.2v2" /></>,
+            'checkmark': c => <><Polyline points="20 6 9 17 4 12" /></>,
+            'shield-checkmark-outline': c => <><Path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><Polyline points="9 12 11 14 15 10" /></>,
+            'information-circle-outline': c => <><Circle cx="12" cy="12" r="10" /><Line x1="12" y1="16" x2="12" y2="12" /><Line x1="12" y1="8" x2="12.01" y2="8" /></>,
+            'close': c => <><Path d="M18 6L6 18M6 6l12 12" /></>,
+          };
+          function Ionicons({ name, size = 24, color = '#fff' }) {
+            const draw = ICONS[name];
+            return (
+              <Svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
+                {draw ? draw(color) : null}
+              </Svg>
+            );
+          }
+
+          const X = Constants.expoConfig?.extra || {};
+          const STORE = 'eclips_state_v1';
+          const CONTEXT_TOKENS = 30000; // окно контекста: более старые сообщения ИИ уже не видит
+          const MAX_MEMORY = 40;
+
+          const plural = n => (n % 10 === 1 && n % 100 !== 11 ? n + ' сообщение' : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? n + ' сообщения' : n + ' сообщений');
+          const rid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+          const newChat = () => ({ id: rid(), title: 'Новый диалог', messages: [], pinned: false, updated: Date.now() });
+          const cleanStream = t => String(t)
+            .replace(/\[\[(?:MEM|SEARCH):[\s\S]*?\]\]/g, '')
+            .replace(/\[\[(?:MEM|SEARCH):[\s\S]*$/, '')
+            .replace(/\[{1,2}(?:M(?:EM?)?|S(?:E(?:A(?:R(?:C(?:H)?)?)?)?)?)?:?$/, '')
+            .trim();
+
+          // Грубая оценка токенов (для русского ~2.5 символа на токен)
+          const estTokens = t => Math.ceil(String(t).length / 2.5) + 4;
+          const contextRoom = (system, budget) => Math.max(1000, budget - estTokens(system) - 700);
+          // Берём самые свежие сообщения, пока они помещаются в бюджет; остальные «забываются»
+          function fitContext(msgs, room) {
+            const out = [];
+            let used = 0;
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              const t = estTokens(msgs[i].content);
+              if (out.length && used + t > room) break;
+              out.unshift(msgs[i]);
+              used += t;
+            }
+            while (out.length > 1 && out[0].role === 'assistant') out.shift();
+            return out;
+          }
+
+          const NO_INFO = 'Я не обладаю актуальной информацией, так как она постоянно обновляется. Введите /helpmenu в игре.';
+          const SYSTEM_PROMPT = `Ты — Eclips AI, помощник игроков Minecraft-сервера Eclips. Отвечай только на русском языке, дружелюбно и кратко.
+
+          ХАРАКТЕР: ты общаешься как дружелюбный напарник и хороший друг. Обращайся на «ты» и по имени, если оно известно. Тон тёплый и живой. Юмор лёгкий и редкий: одна короткая шутка к месту, не в каждом ответе. Смайликов мало, 0–1 на ответ. Отвечай коротко, 2–4 предложения, вопрос задавай не чаще одного за ответ. Не шути над внешностью, возрастом и навыками, не груби, мат не используй. Если человеку грустно или он злится, поддержи по-человечески, без шуток. На темы не про сервер можешь поговорить по-дружески, но факты о сервере выдумывать нельзя.
+
+          АДАПТАЦИЯ: подстраивайся под пользователя по запомненным фактам и по его манере писать. Пишет коротко и по делу — отвечай ещё короче. Любит подробности — объясняй подробнее. Пишет неформально — будь проще. Новичок — объясняй шаги простыми словами. Учитывай интересы и ник из памяти. Факты о человеке не придумывай.
+
+          ПОИСК: у тебя есть поиск по Википедии. Ты сам решаешь, когда он нужен. Используй его для общих вопросов о людях, местах, понятиях, истории, науке, технологиях и Minecraft в целом, если ты не уверен в ответе. Чтобы поискать, ответь ТОЛЬКО тегом [[SEARCH: короткий запрос]] и ничем больше. Результаты придут отдельным служебным сообщением, после него ответь пользователю по ним и упомяни, что информация из Википедии. НЕ ищи: вопросы про сервер Eclips (команды, цены, события, награды и т.д. — только документация выше), болтовню, личные вопросы, просьбы о совете. В Википедии нет свежих новостей и погоды — скажи честно, что актуальных новостей у тебя нет.
+
+          Твои задачи: общаться с игроками, отвечать на общие вопросы, помогать новичкам, объяснять известные функции сервера, помогать ориентироваться в командах.
+
+          ИЗВЕСТНЫЕ КОМАНДЫ (из плагина HelpMenu 1.0.0):
+          /help — меню помощи
+          /helpmenu — меню помощи
+          /shop — магазин
+          /topshop — информация о магазине
+          /skup — скупка
+          /auc — аукцион
+          /rgm — команда, связанная с приватами
+          /event — события
+          /clan — кланы
+          /kit — наборы
+          /warp — телепортация
+          /daily — ежедневная награда
+          /ref — реферальная система
+
+          РАЗДЕЛЫ ПОМОЩИ: Приваты, Покупка, Продажа, События, Кланы, Помощь новичкам.
+
+          ПОДТВЕРЖДЁННО: событие по команде /event проводится каждый час (старая информация «раз в два часа» устарела).
+
+          ПРАВИЛА ДОСТОВЕРНОСТИ:
+          - Не выдумывай команды, параметры, цены, награды, расписания и игровые механики.
+          - Не утверждай, как работает команда, если её назначение не указано выше.
+          - Не выдавай устаревшие сведения за актуальные.
+          - Если вопрос о сервере и ты не можешь дать достоверный актуальный ответ, ответь СТРОГО этим текстом и ничем больше: «${NO_INFO}»
+          - Достоверность важнее количества ответов.
+          - Никогда не пиши синтаксис команд, аргументы, параметры и примеры использования команд (например «/rgm имя»). Называй только команду и её назначение из списка выше.
+          - Вопросы «как сделать / как купить / как приватить / сколько стоит / какая награда / как работает» про механику сервера: если подробной подтверждённой инструкции выше нет, отвечай строго фразой «${NO_INFO}» и ничем больше.
+          - Пиши простым текстом без markdown-разметки (без ** и без обратных кавычек).
+          Примеры:
+          Пользователь: «Как приватить?» → Ответ: «${NO_INFO}»
+          Пользователь: «Какие есть команды?» → Ответ: перечень известных команд с назначением.
+          Пользователь: «Как часто проходит событие?» → Ответ: Событие по команде /event проводится каждый час.
+
+          ПАМЯТЬ ЧАТА: если пользователь сообщает факты о себе (имя, возраст, ник в игре, интересы, а также как ему удобнее общаться: коротко или подробно, с шутками или без и т.п.) или просит что-то запомнить, добавь в самый конец ответа тег вида [[MEM: короткий факт]] (по одному тегу на факт, например [[MEM: Зовут Руслан]]). Пользователю тег не упоминай. Не сохраняй пароли, номера карт и другие секреты. Если пользователь спрашивает о себе — используй блок «Что известно о пользователе». Память общая для всех чатов. Если просят забыть что-то — скажи, что факты можно удалить, нажав на «ПАМЯТЬ» вверху экрана. Ты помнишь последние сообщения этого чата и сохранённые факты. Если спрашивают, помнишь ли ты пользователя, отвечай по этим данным и не говори, что у тебя нет памяти.`;
+
+          const PROVIDERS = [
+            { name: 'groq', url: 'https://api.groq.com/openai/v1/chat/completions', key: X.groqKey, model: 'llama-3.3-70b-versatile' },
+            { name: 'openrouter', url: 'https://openrouter.ai/api/v1/chat/completions', key: X.openrouterKey, model: 'meta-llama/llama-3.3-70b-instruct:free' },
+            { name: 'openrouter', url: 'https://openrouter.ai/api/v1/chat/completions', key: X.openrouterKey, model: 'openrouter/free' },
+          ].filter(p => p.key);
+
+          const buildSystem = memory => {
+            const facts = (memory || []).slice(-MAX_MEMORY).map(f => '- ' + f);
+            return SYSTEM_PROMPT + (facts.length ? '\n\nЧто известно о пользователе (сохранено на его устройстве, общее для всех чатов):\n' + facts.join('\n') : '');
+          };
+
+          // Поиск по Википедии (бесплатно, без ключа)
+          async function wikiSearch(q, signal) {
+            for (const lang of ['ru', 'en']) {
+              try {
+                const url = 'https://' + lang + '.wikipedia.org/w/api.php?action=query&generator=search&gsrsearch=' + encodeURIComponent(q) +
+                  '&gsrlimit=3&prop=extracts%7Cinfo&inprop=url&exintro=1&explaintext=1&exchars=900&format=json&origin=*';
+                const res = await fetch(url, { signal });
+                if (!res.ok) continue;
+                const d = await res.json();
+                const pages = Object.values(d?.query?.pages || {}).sort((a, b) => a.index - b.index).filter(p => p.extract);
+                if (pages.length) {
+                  return {
+                    text: pages.map((p, i) => (i + 1) + ') ' + p.title + ': ' + p.extract).join('\n\n'),
+                    sources: pages.map(p => ({ title: p.title, url: p.fullurl })),
+                  };
+                }
+              } catch (e) {
+                if (signal.aborted) throw e;
+              }
+            }
+            return { text: '', sources: [] };
+          }
+
+          // Запрос к ИИ с потоковым выводом. onText получает весь накопленный текст.
+          async function callAI(msgs, memory, signal, onText) {
+            if (!PROVIDERS.length) throw new Error('В сборке нет ключа ИИ.');
+            const system = buildSystem(memory);
+            const canStream = typeof TextDecoder !== 'undefined';
+            let prevLen = -1;
+            // сначала окно 30000 токенов; если бесплатный лимит не принял — меньшее окно
+            for (const budget of [CONTEXT_TOKENS, 8000]) {
+              const ctx = fitContext(msgs, contextRoom(system, budget));
+              if (ctx.length === prevLen) break;
+              prevLen = ctx.length;
+              const full = [{ role: 'system', content: system }, ...ctx.map(({ role, content }) => ({ role, content }))];
+              for (const p of PROVIDERS) {
+                let text = '';
+                try {
+                  const res = await expoFetch(p.url, {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      Authorization: 'Bearer ' + p.key,
+                      ...(p.name === 'openrouter' ? { 'HTTP-Referer': 'https://eclips.app', 'X-Title': 'Eclips AI' } : {}),
+                    },
+                    body: JSON.stringify({ model: p.model, messages: full, temperature: 0.4, max_tokens: 700, stream: canStream }),
+                    signal,
+                  });
+                  if (!res.ok) continue;
+                  if (canStream && res.body && res.body.getReader) {
+                    const reader = res.body.getReader();
+                    const dec = new TextDecoder();
+                    let buf = '';
+                    while (true) {
+                      const { done, value } = await reader.read();
+                      if (done) break;
+                      buf += dec.decode(value, { stream: true });
+                      const lines = buf.split('\n');
+                      buf = lines.pop();
+                      for (const line of lines) {
+                        const l = line.trim();
+                        if (!l.startsWith('data:')) continue;
+                        const data = l.slice(5).trim();
+                        if (!data || data === '[DONE]') continue;
+                        try {
+                          const delta = JSON.parse(data).choices?.[0]?.delta?.content;
+                          if (delta) { text += delta; onText(text); }
+                        } catch (e) {}
+                      }
+                    }
+                  } else {
+                    const d = await res.json();
+                    text = d?.choices?.[0]?.message?.content || '';
+                    if (text) onText(text);
+                  }
+                  if (text) return text;
+                } catch (e) {
+                  if (signal.aborted) throw e;
+                  if (text) return text;
+                  if (/network|failed to connect|unable to resolve/i.test(String(e.message))) throw e;
+                }
+              }
+            }
+            throw new Error('ИИ временно недоступен (лимиты бесплатных тарифов или сбой). Попробуйте позже.');
+          }
+
+          // Простое оформление ответа: **жирный**, `код`, *курсив*
+          const prep = t => String(t).replace(/^#{1,6}\s+(.+)$/gm, '**$1**').replace(/^\s*[-*]\s+/gm, '• ');
+          function inline(str, key) {
+            const out = [];
+            const re = /\*\*([^*]+)\*\*|`([^`]+)`|\*([^*\s][^*]*)\*/g;
+            let last = 0, m, i = 0;
+            while ((m = re.exec(str))) {
+              if (m.index > last) out.push(str.slice(last, m.index));
+              const k = key + '-' + i++;
+              if (m[1] !== undefined) out.push(<Text key={k} style={{ fontWeight: '700' }}>{inline(m[1], k)}</Text>);
+              else if (m[2] !== undefined) out.push(<Text key={k} style={s.code}>{m[2]}</Text>);
+              else out.push(<Text key={k} style={{ fontStyle: 'italic' }}>{m[3]}</Text>);
+              last = re.lastIndex;
+            }
+            if (last < str.length) out.push(str.slice(last));
+            return out;
+          }
+          const renderMd = t => inline(prep(t), 'm');
+
+          export default function App() {
+            return (
+              <SafeAreaProvider>
+                <Main />
+              </SafeAreaProvider>
+            );
+          }
+
+          function Main() {
+            const [ready, setReady] = useState(false);
+            const [chatId, setChatId] = useState('');
+            const [chats, setChats] = useState([]);
+            const [memory, setMemory] = useState([]); // общая память для всех чатов
+            const [activeId, setActiveId] = useState(null);
+            const [input, setInput] = useState('');
+            const [busy, setBusy] = useState(false);
+            const [err, setErr] = useState(null);
+            const [net, setNet] = useState(true);
+            const [sheet, setSheet] = useState(null); // 'menu' | 'settings' | 'memory'
+            const [rename, setRename] = useState(null);
+            const [copied, setCopied] = useState(false);
+            const [query, setQuery] = useState('');
+            const [toast, setToast] = useState('');
+            const [status, setStatus] = useState('');
+            const listRef = useRef(null);
+            const abortRef = useRef(null);
+            const stoppedRef = useRef(false);
+            const sentRef = useRef([]);
+            const toastTimer = useRef(null);
+
+            const showToast = t => {
+              setToast(t);
+              clearTimeout(toastTimer.current);
+              toastTimer.current = setTimeout(() => setToast(''), 1800);
+            };
+
+            // состояние сети
+            useEffect(() => {
+              const apply = st => setNet(!!st.isConnected && st.isInternetReachable !== false);
+              NetInfo.fetch().then(apply).catch(() => {});
+              return NetInfo.addEventListener(apply);
+            }, []);
+
+            // загрузка
+            useEffect(() => {
+              (async () => {
+                let st = null;
+                try { st = JSON.parse(await AsyncStorage.getItem(STORE)); } catch (e) {}
+                const cid = st?.chatId || 'eclips-' + rid() + '-' + rid();
+                const list = st?.chats?.length ? st.chats : [newChat()];
+                // перенос старой памяти отдельных чатов в общую
+                const mem = [];
+                (st?.memory || []).forEach(f => { if (!mem.includes(f)) mem.push(f); });
+                (st?.chats || []).forEach(c => (c.memory || []).forEach(f => { if (!mem.includes(f)) mem.push(f); }));
+                setChatId(cid);
+                setChats(list.map(({ memory: _m, ...c }) => c));
+                setMemory(mem.slice(-MAX_MEMORY));
+                setActiveId(st?.activeId && list.some(c => c.id === st.activeId) ? st.activeId : list[0].id);
+                setReady(true);
+              })();
+            }, []);
+
+            // автосохранение (только на устройстве)
+            useEffect(() => {
+              if (!ready) return;
+              AsyncStorage.setItem(STORE, JSON.stringify({ chatId, chats, memory, activeId })).catch(() => {});
+            }, [ready, chatId, chats, memory, activeId]);
+
+            const active = chats.find(c => c.id === activeId) || chats[0];
+            const patch = (id, fn) => setChats(cs => cs.map(c => (c.id === id ? fn(c) : c)));
+
+            const allowSend = () => {
+              if (!net) { showToast('Нет подключения к интернету'); return false; }
+              const now = Date.now();
+              sentRef.current = sentRef.current.filter(t => now - t < 60000);
+              const last = sentRef.current[sentRef.current.length - 1];
+              if (last && now - last < 2000) { showToast('Подождите пару секунд'); return false; }
+              if (sentRef.current.length >= 20) { showToast('Слишком много сообщений. Подождите минуту'); return false; }
+              sentRef.current.push(now);
+              return true;
+            };
+
+            const addFacts = facts => setMemory(m => {
+              const n = [...m];
+              facts.forEach(f => { if (!n.includes(f)) n.push(f); });
+              return n.slice(-MAX_MEMORY);
+            });
+
+            const ask = async (cid, msgs, mem) => {
+              setBusy(true);
+              setErr(null);
+              stoppedRef.current = false;
+              const ctrl = new AbortController();
+              abortRef.current = ctrl;
+              let timedOut = false;
+              let timer;
+              const arm = () => {
+                clearTimeout(timer);
+                timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, 30000);
+              };
+              const mid = rid();
+              let full = '';
+              let lastShow = 0;
+              const show = (text, sources) => {
+                const content = cleanStream(text);
+                if (!content) return;
+                patch(cid, c => {
+                  const has = c.messages.some(m => m.id === mid);
+                  return {
+                    ...c,
+                    updated: Date.now(),
+                    messages: has
+                      ? c.messages.map(m => (m.id === mid ? { ...m, content, ...(sources ? { sources } : {}) } : m))
+                      : [...c.messages, { id: mid, role: 'assistant', content, ...(sources ? { sources } : {}) }],
+                  };
+                });
+              };
+              arm();
+              try {
+                const onText = t => {
+                  full = t;
+                  arm();
+                  const now = Date.now();
+                  if (now - lastShow > 70) { lastShow = now; show(t); }
+                };
+                const facts = [];
+                const grab = txt => txt.replace(/\[\[MEM:([\s\S]*?)\]\]/g, (_, f) => { if (f.trim()) facts.push(f.trim().slice(0, 200)); return ''; });
+                let text = await callAI(msgs, mem, ctrl.signal, onText);
+                grab(text);
+                let sources;
+                const sm = text.match(/\[\[SEARCH:\s*([^\]]+?)\s*\]\]/);
+                if (sm) {
+                  const q = sm[1].trim();
+                  setStatus('Ищу в Википедии…');
+                  const found = await wikiSearch(q, ctrl.signal);
+                  setStatus('');
+                  arm();
+                  const note = found.text
+                    ? 'РЕЗУЛЬТАТЫ ПОИСКА В ВИКИПЕДИИ по запросу «' + q + '» (служебное сообщение, не от пользователя):\n' + found.text +
+                      '\n\nОтветь на последний вопрос пользователя, опираясь на эти данные, и упомяни, что информация из Википедии. Если данных недостаточно, скажи об этом честно. Больше не используй [[SEARCH]].'
+                    : 'Поиск в Википедии по запросу «' + q + '» ничего не нашёл (служебное сообщение, не от пользователя). Честно скажи, что не нашёл информации, и отвечай только если уверен. Больше не используй [[SEARCH]].';
+                  full = '';
+                  text = await callAI([...msgs, { role: 'assistant', content: '[[SEARCH: ' + q + ']]' }, { role: 'user', content: note }], mem, ctrl.signal, onText);
+                  grab(text);
+                  if (found.sources.length) sources = found.sources;
+                }
+                full = text;
+                show(cleanStream(text) ? text : 'Запомнил!', sources);
+                if (facts.length) addFacts(facts);
+              } catch (e) {
+                if (full) show(full);
+                if (stoppedRef.current) {
+                  // остановлено пользователем — без ошибки
+                } else if (timedOut) setErr('Превышено время ожидания. Повторите запрос.');
+                else if (/network|failed to connect|unable to resolve/i.test(String(e.message))) setErr('Нет соединения с интернетом или сервером.');
+                else setErr(e.message || 'Не удалось получить ответ.');
+              } finally {
+                clearTimeout(timer);
+                abortRef.current = null;
+                setStatus('');
+                setBusy(false);
+              }
+            };
+
+            const stop = () => {
+              stoppedRef.current = true;
+              abortRef.current?.abort();
+            };
+
+            const send = () => {
+              const text = input.trim();
+              if (!text || busy || !active) return;
+              if (!allowSend()) return;
+              const msg = { id: rid(), role: 'user', content: text.slice(0, 2000) };
+              const msgs = [...active.messages, msg];
+              setInput('');
+              patch(active.id, c => ({
+                ...c, messages: msgs, updated: Date.now(),
+                title: c.messages.length === 0 ? text.slice(0, 30) : c.title,
+              }));
+              ask(active.id, msgs, memory);
+            };
+
+            // «Повторить» после ошибки и «Ответить заново»
+            const redo = () => {
+              if (!active || busy) return;
+              if (!allowSend()) return;
+              const msgs = [...active.messages];
+              while (msgs.length && msgs[msgs.length - 1].role !== 'user') msgs.pop();
+              if (!msgs.length) return;
+              patch(active.id, c => ({ ...c, messages: msgs }));
+              ask(active.id, msgs, memory);
+            };
+
+            const copyText = async t => {
+              await Clipboard.setStringAsync(t);
+              showToast('Скопировано');
+            };
+
+            const createChat = () => {
+              const c = newChat();
+              setChats(cs => [c, ...cs]);
+              setActiveId(c.id);
+              setErr(null);
+              closeSheet();
+            };
+
+            const closeSheet = () => { setSheet(null); setQuery(''); };
+
+            const removeChat = id => {
+              Alert.alert('Удалить диалог?', 'Переписка будет удалена с устройства.', [
+                { text: 'Отмена', style: 'cancel' },
+                { text: 'Удалить', style: 'destructive', onPress: () => {
+                  let rest = chats.filter(c => c.id !== id);
+                  if (!rest.length) rest = [newChat()];
+                  setChats(rest);
+                  if (id === activeId) { setActiveId(rest[0].id); setErr(null); }
+                } },
+              ]);
+            };
+
+            const clearAll = () => {
+              Alert.alert('Удалить все переписки?', 'Это действие нельзя отменить. Память о вас останется, её можно очистить отдельно.', [
+                { text: 'Отмена', style: 'cancel' },
+                { text: 'Удалить', style: 'destructive', onPress: () => {
+                  const c = newChat();
+                  setChats([c]); setActiveId(c.id); setErr(null); closeSheet();
+                } },
+              ]);
+            };
+
+            const clearMemory = () => {
+              Alert.alert('Очистить память?', 'ИИ забудет всё, что вы о себе рассказывали.', [
+                { text: 'Отмена', style: 'cancel' },
+                { text: 'Очистить', style: 'destructive', onPress: () => setMemory([]) },
+              ]);
+            };
+
+            const copyId = async () => {
+              await Clipboard.setStringAsync(chatId);
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1500);
+            };
+
+            if (!ready) return <View style={[s.fill, { backgroundColor: '#0B1220' }]} />;
+
+            const data = active?.messages || [];
+            const lastMsg = data[data.length - 1];
+            const ctxStart = data.length - fitContext(data, contextRoom(buildSystem(memory), CONTEXT_TOKENS)).length;
+            const q = query.trim().toLowerCase();
+            const shownChats = chats
+              .filter(c => !q || c.title.toLowerCase().includes(q) || c.messages.some(m => m.content.toLowerCase().includes(q)))
+              .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || b.updated - a.updated);
+
+            return (
+              <LinearGradient colors={['#0A101C', '#0E2243', '#0A101C']} style={s.fill}>
+                <StatusBar style="light" />
+                <SafeAreaView style={s.fill}>
+                  <KeyboardAvoidingView style={s.fill} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+                    <View style={s.header}>
+                      <TouchableOpacity style={s.iconBtn} onPress={() => setSheet('menu')}>
+                        <Ionicons name="menu" size={26} color="#E5E7EB" />
+                      </TouchableOpacity>
+                      <View style={{ alignItems: 'center' }}>
+                        <Text style={s.title}>Eclips AI</Text>
+                        <View style={s.row}>
+                          <View style={[s.dot, { backgroundColor: net ? '#22C55E' : '#EF4444' }]} />
+                          <Text style={[s.status, { color: net ? '#22C55E' : '#EF4444' }]}>{net ? 'Online' : 'Нет сети'}</Text>
+                        </View>
+                      </View>
+                      <TouchableOpacity style={s.iconBtn} onPress={() => setSheet('settings')}>
+                        <Ionicons name="settings-outline" size={24} color="#E5E7EB" />
+                      </TouchableOpacity>
+                    </View>
+
+                    {!net && (
+                      <View style={s.offline}>
+                        <Ionicons name="cloud-offline-outline" size={18} color="#FCA5A5" />
+                        <Text style={s.offlineText}>Нет подключения к интернету</Text>
+                      </View>
+                    )}
+
+                    <View style={s.subHeader}>
+                      <Text style={s.chatTitle} numberOfLines={1}>{active?.title}</Text>
+                      <TouchableOpacity style={s.badge} onPress={() => setSheet('memory')}>
+                        <Text style={s.badgeText}>ПАМЯТЬ · {memory.length}</Text>
+                      </TouchableOpacity>
+                    </View>
+
+                    <FlatList
+                      ref={listRef}
+                      data={data}
+                      keyExtractor={m => m.id}
+                      contentContainerStyle={{ padding: 16, paddingBottom: 8 }}
+                      onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
+                      ListEmptyComponent={<Text style={s.empty}>Напишите сообщение, чтобы начать диалог.</Text>}
+                      renderItem={({ item, index }) => (
+                        <View style={{ marginBottom: 14 }}>
+                          {index === ctxStart && ctxStart > 0 && (
+                            <View style={s.ctxLine}>
+                              <View style={s.ctxRule} />
+                              <Text style={s.ctxText}>выше ИИ уже не помнит</Text>
+                              <View style={s.ctxRule} />
+                            </View>
+                          )}
+                          <View style={[s.bubble, item.role === 'user' ? s.user : s.ai]}>
+                            <Text style={s.msg} selectable>{item.role === 'user' ? item.content : renderMd(item.content)}</Text>
+                          </View>
+                          {!!item.sources?.length && !(busy && index === data.length - 1) && (
+                            <View style={s.sources}>
+                              <Text style={s.srcLabel}>Википедия:</Text>
+                              {item.sources.map(src => (
+                                <TouchableOpacity key={src.url} onPress={() => Linking.openURL(src.url)}>
+                                  <Text style={s.srcLink} numberOfLines={1}>{src.title}</Text>
+                                </TouchableOpacity>
+                              ))}
+                            </View>
+                          )}
+                          {item.role === 'assistant' && !(busy && index === data.length - 1) && (
+                            <View style={s.actions}>
+                              <TouchableOpacity style={s.actBtn} onPress={() => copyText(item.content)} hitSlop={8}>
+                                <Ionicons name="copy-outline" size={18} color="#9CA3AF" />
+                              </TouchableOpacity>
+                              {index === data.length - 1 && (
+                                <TouchableOpacity style={s.actBtn} onPress={redo} hitSlop={8}>
+                                  <Ionicons name="refresh" size={18} color="#9CA3AF" />
+                                </TouchableOpacity>
+                              )}
+                            </View>
+                          )}
+                        </View>
+                      )}
+                      ListFooterComponent={
+                        <View>
+                          {busy && lastMsg?.role === 'user' && (
+                            <View style={[s.bubble, s.ai, s.row]}>
+                              <ActivityIndicator size="small" color="#3B82F6" />
+                              <Text style={[s.msg, { marginLeft: 10, color: '#9CA3AF' }]}>{status || 'Eclips AI печатает…'}</Text>
+                            </View>
+                          )}
+                          {err && !busy && (
+                            <View style={s.errBox}>
+                              <Text style={s.errText}>{err}</Text>
+                              <TouchableOpacity style={s.retry} onPress={redo}>
+                                <Ionicons name="refresh" size={16} color="#fff" />
+                                <Text style={s.retryText}>Повторить</Text>
+                              </TouchableOpacity>
+                            </View>
+                          )}
+                        </View>
+                      }
+                    />
+
+                    {!!toast && (
+                      <View style={s.toast} pointerEvents="none"><Text style={s.toastText}>{toast}</Text></View>
+                    )}
+
+                    <View style={s.inputWrap}>
+                      <TextInput
+                        style={s.input}
+                        value={input}
+                        onChangeText={setInput}
+                        placeholder="Напишите сообщение…"
+                        placeholderTextColor="#6B7280"
+                        multiline
+                        maxLength={2000}
+                      />
+                      {busy ? (
+                        <TouchableOpacity style={[s.send, { backgroundColor: '#374151' }]} onPress={stop}>
+                          <Ionicons name="stop" size={22} color="#fff" />
+                        </TouchableOpacity>
+                      ) : (
+                        <TouchableOpacity style={[s.send, !input.trim() && { opacity: 0.4 }]} onPress={send} disabled={!input.trim()}>
+                          <Ionicons name="arrow-up" size={24} color="#fff" />
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                    <Text style={s.disclaimer}>Ответы ИИ могут ошибаться</Text>
+                  </KeyboardAvoidingView>
+
+                  {/* Диалоги */}
+                  <Sheet visible={sheet === 'menu'} eyebrow="ИСТОРИЯ" title="Мои диалоги" onClose={closeSheet}>
+                    <TouchableOpacity style={s.newBtn} onPress={createChat}>
+                      <Ionicons name="add" size={24} color="#fff" />
+                      <Text style={s.newBtnText}>Новый диалог</Text>
+                    </TouchableOpacity>
+                    <View style={s.search}>
+                      <Ionicons name="search" size={20} color="#6B7280" />
+                      <TextInput
+                        style={s.searchInput}
+                        value={query}
+                        onChangeText={setQuery}
+                        placeholder="Поиск по диалогам"
+                        placeholderTextColor="#6B7280"
+                      />
+                      {!!query && (
+                        <TouchableOpacity onPress={() => setQuery('')} hitSlop={10}>
+                          <Ionicons name="close-circle" size={20} color="#6B7280" />
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                    <FlatList
+                      data={shownChats}
+                      keyExtractor={c => c.id}
+                      style={{ marginTop: 12 }}
+                      keyboardShouldPersistTaps="handled"
+                      ListEmptyComponent={<Text style={s.note}>Ничего не найдено.</Text>}
+                      renderItem={({ item }) => (
+                        <TouchableOpacity
+                          style={[s.chatItem, item.id === active?.id && s.chatItemActive]}
+                          onPress={() => { setActiveId(item.id); setErr(null); closeSheet(); }}
+                        >
+                          <Ionicons name="chatbubble-ellipses-outline" size={24} color={item.id === active?.id ? '#3B82F6' : '#9CA3AF'} />
+                          <View style={{ flex: 1, marginLeft: 12 }}>
+                            <Text style={s.chatItemTitle} numberOfLines={1}>{item.title}</Text>
+                            <Text style={s.chatItemSub}>{plural(item.messages.length)}</Text>
+                          </View>
+                          <TouchableOpacity hitSlop={8} onPress={() => patch(item.id, c => ({ ...c, pinned: !c.pinned }))} style={{ padding: 6 }}>
+                            <Ionicons name={item.pinned ? 'pin' : 'pin-outline'} size={20} color={item.pinned ? '#3B82F6' : '#9CA3AF'} />
+                          </TouchableOpacity>
+                          <TouchableOpacity hitSlop={8} onPress={() => setRename({ id: item.id, text: item.title })} style={{ padding: 6 }}>
+                            <Ionicons name="pencil" size={20} color="#9CA3AF" />
+                          </TouchableOpacity>
+                          <TouchableOpacity hitSlop={8} onPress={() => removeChat(item.id)} style={{ padding: 6 }}>
+                            <Ionicons name="trash-outline" size={22} color="#F87171" />
+                          </TouchableOpacity>
+                        </TouchableOpacity>
+                      )}
+                    />
+                  </Sheet>
+
+                  {/* Память */}
+                  <Sheet visible={sheet === 'memory'} eyebrow="ОБЩАЯ ПАМЯТЬ" title="Что я помню" onClose={closeSheet}>
+                    {memory.length === 0 ? (
+                      <Text style={s.note}>Пока пусто. Расскажите о себе, например имя, возраст или ник в игре, и я запомню это во всех чатах.</Text>
+                    ) : (
+                      <FlatList
+                        data={memory}
+                        keyExtractor={(f, i) => i + f}
+                        renderItem={({ item, index }) => (
+                          <View style={s.memItem}>
+                            <Text style={s.memText}>{item}</Text>
+                            <TouchableOpacity hitSlop={10} onPress={() => setMemory(m => m.filter((_, i) => i !== index))}>
+                              <Ionicons name="close-circle" size={24} color="#F87171" />
+                            </TouchableOpacity>
+                          </View>
+                        )}
+                      />
+                    )}
+                    {memory.length > 0 && (
+                      <TouchableOpacity style={s.danger} onPress={clearMemory}>
+                        <Ionicons name="trash-outline" size={22} color="#F87171" />
+                        <Text style={s.dangerText}>Очистить память</Text>
+                      </TouchableOpacity>
+                    )}
+                  </Sheet>
+
+                  {/* Настройки */}
+                  <Sheet visible={sheet === 'settings'} eyebrow="ECLIPS AI" title="Настройки" onClose={closeSheet}>
+                    <View style={s.idCard}>
+                      <View style={s.idIcon}><Ionicons name="finger-print" size={30} color="#3B82F6" /></View>
+                      <View style={{ flex: 1, marginHorizontal: 14 }}>
+                        <Text style={s.idLabel}>Ваш Chat ID</Text>
+                        <Text style={s.idValue} selectable>{chatId}</Text>
+                      </View>
+                      <TouchableOpacity onPress={copyId} hitSlop={10}>
+                        <Ionicons name={copied ? 'checkmark' : 'copy-outline'} size={26} color="#3B82F6" />
+                      </TouchableOpacity>
+                    </View>
+                    <Text style={s.note}>ID хранится на этом устройстве и нужен для ограничения частоты запросов. Регистрация не требуется.</Text>
+                    <View style={s.infoRow}>
+                      <Ionicons name="shield-checkmark-outline" size={26} color="#22C55E" />
+                      <Text style={s.infoText}>Переписки и память хранятся только на устройстве</Text>
+                    </View>
+                    <View style={s.infoRow}>
+                      <Ionicons name="information-circle-outline" size={26} color="#3B82F6" />
+                      <Text style={s.infoText}>Eclips AI · версия 1.3.0</Text>
+                    </View>
+                    <TouchableOpacity style={s.danger} onPress={clearAll}>
+                      <Ionicons name="trash-outline" size={22} color="#F87171" />
+                      <Text style={s.dangerText}>Удалить все локальные переписки</Text>
+                    </TouchableOpacity>
+                  </Sheet>
+
+                  {/* Переименование */}
+                  <Modal visible={!!rename} transparent animationType="fade" onRequestClose={() => setRename(null)}>
+                    <View style={s.center}>
+                      <View style={s.dialog}>
+                        <Text style={s.dialogTitle}>Переименовать диалог</Text>
+                        <TextInput
+                          style={s.dialogInput}
+                          value={rename?.text || ''}
+                          onChangeText={t => setRename(r => ({ ...r, text: t }))}
+                          maxLength={40}
+                          autoFocus
+                          placeholderTextColor="#6B7280"
+                        />
+                        <View style={[s.row, { justifyContent: 'flex-end', marginTop: 16 }]}>
+                          <TouchableOpacity onPress={() => setRename(null)} style={{ padding: 10 }}>
+                            <Text style={{ color: '#9CA3AF', fontSize: 16 }}>Отмена</Text>
+                          </TouchableOpacity>
+                          <TouchableOpacity
+                            style={{ padding: 10 }}
+                            onPress={() => {
+                              const t = (rename.text || '').trim();
+                              if (t) patch(rename.id, c => ({ ...c, title: t }));
+                              setRename(null);
+                            }}
+                          >
+                            <Text style={{ color: '#3B82F6', fontSize: 16, fontWeight: '700' }}>Сохранить</Text>
+                          </TouchableOpacity>
+                        </View>
+                      </View>
+                    </View>
+                  </Modal>
+                </SafeAreaView>
+              </LinearGradient>
+            );
+          }
+
+          function Sheet({ visible, eyebrow, title, onClose, children }) {
+            return (
+              <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+                <View style={s.backdrop}>
+                  <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={onClose} />
+                  <View style={s.sheet}>
+                    <View style={s.handle} />
+                    <View style={[s.row, { justifyContent: 'space-between', marginBottom: 18 }]}>
+                      <View>
+                        <Text style={s.eyebrow}>{eyebrow}</Text>
+                        <Text style={s.sheetTitle}>{title}</Text>
+                      </View>
+                      <TouchableOpacity style={s.closeBtn} onPress={onClose}>
+                        <Ionicons name="close" size={26} color="#fff" />
+                      </TouchableOpacity>
+                    </View>
+                    {children}
+                  </View>
+                </View>
+              </Modal>
+            );
+          }
+
+          const s = StyleSheet.create({
+            fill: { flex: 1 },
+            row: { flexDirection: 'row', alignItems: 'center' },
+            header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingTop: 8 },
+            iconBtn: { width: 48, height: 48, borderRadius: 16, backgroundColor: 'rgba(255,255,255,0.06)', alignItems: 'center', justifyContent: 'center' },
+            title: { color: '#fff', fontSize: 24, fontWeight: '700' },
+            dot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
+            status: { fontSize: 14, fontWeight: '600' },
+            offline: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(239,68,68,0.15)', marginHorizontal: 16, marginTop: 10, paddingVertical: 8, borderRadius: 12 },
+            offlineText: { color: '#FCA5A5', fontSize: 14, marginLeft: 8 },
+            subHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, marginTop: 14 },
+            chatTitle: { color: '#E5E7EB', fontSize: 16, fontWeight: '600', flex: 1, marginRight: 10 },
+            badge: { backgroundColor: 'rgba(59,130,246,0.18)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 10 },
+            badgeText: { color: '#93B4F5', fontSize: 12, fontWeight: '700', letterSpacing: 1 },
+            empty: { color: '#6B7280', textAlign: 'center', marginTop: 60, fontSize: 15 },
+            bubble: { maxWidth: '84%', paddingHorizontal: 18, paddingVertical: 14, borderRadius: 22 },
+            user: { alignSelf: 'flex-end', backgroundColor: '#3B82F6' },
+            ai: { alignSelf: 'flex-start', backgroundColor: '#1A2233', borderWidth: 1, borderColor: '#243049' },
+            ctxLine: { flexDirection: 'row', alignItems: 'center', marginBottom: 12 },
+            ctxRule: { flex: 1, height: 1, backgroundColor: '#243049' },
+            ctxText: { color: '#6B7280', fontSize: 12, marginHorizontal: 10 },
+            sources: { alignSelf: 'flex-start', marginTop: 6, marginLeft: 8, maxWidth: '84%' },
+            srcLabel: { color: '#6B7280', fontSize: 12, marginBottom: 2 },
+            srcLink: { color: '#60A5FA', fontSize: 13, textDecorationLine: 'underline', paddingVertical: 2 },
+            actions: { flexDirection: 'row', alignSelf: 'flex-start', marginTop: 6, marginLeft: 8 },
+            actBtn: { padding: 6, marginRight: 6 },
+            code: { fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', backgroundColor: 'rgba(255,255,255,0.12)', color: '#BFDBFE' },
+            msg: { color: '#fff', fontSize: 16, lineHeight: 24 },
+            toast: { alignSelf: 'center', backgroundColor: 'rgba(31,41,55,0.95)', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 14, marginBottom: 8 },
+            toastText: { color: '#fff', fontSize: 14 },
+            errBox: { backgroundColor: 'rgba(239,68,68,0.12)', borderColor: '#7F1D1D', borderWidth: 1, borderRadius: 16, padding: 14, marginBottom: 10 },
+            errText: { color: '#FCA5A5', fontSize: 14 },
+            retry: { flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', backgroundColor: '#3B82F6', borderRadius: 12, paddingHorizontal: 14, paddingVertical: 8, marginTop: 10 },
+            retryText: { color: '#fff', fontWeight: '600', marginLeft: 6 },
+            inputWrap: { flexDirection: 'row', alignItems: 'flex-end', marginHorizontal: 14, backgroundColor: '#1A2233', borderRadius: 28, borderWidth: 1, borderColor: '#2A3752', paddingLeft: 18, paddingRight: 8, paddingVertical: 8 },
+            input: { flex: 1, color: '#fff', fontSize: 16, maxHeight: 120, paddingVertical: 10 },
+            send: { width: 46, height: 46, borderRadius: 16, backgroundColor: '#2563EB', alignItems: 'center', justifyContent: 'center', marginLeft: 8 },
+            disclaimer: { color: '#6B7280', fontSize: 12, textAlign: 'center', paddingHorizontal: 24, paddingVertical: 8 },
+            backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)' },
+            sheet: { backgroundColor: '#0C1424', borderTopLeftRadius: 32, borderTopRightRadius: 32, padding: 22, paddingBottom: 30, maxHeight: '85%' },
+            handle: { alignSelf: 'center', width: 56, height: 5, borderRadius: 3, backgroundColor: '#2B3C5E', marginBottom: 18 },
+            eyebrow: { color: '#3B82F6', fontSize: 13, fontWeight: '800', letterSpacing: 2 },
+            sheetTitle: { color: '#fff', fontSize: 30, fontWeight: '800' },
+            closeBtn: { width: 52, height: 52, borderRadius: 26, backgroundColor: '#142039', alignItems: 'center', justifyContent: 'center' },
+            newBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: '#3B82F6', borderRadius: 28, paddingVertical: 16 },
+            newBtnText: { color: '#fff', fontSize: 18, fontWeight: '700', marginLeft: 8 },
+            search: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1A2233', borderRadius: 20, borderWidth: 1, borderColor: '#243049', paddingHorizontal: 14, marginTop: 14 },
+            searchInput: { flex: 1, color: '#fff', fontSize: 16, paddingVertical: 12, marginLeft: 10 },
+            chatItem: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1A2233', borderRadius: 24, borderWidth: 1, borderColor: '#243049', padding: 16, marginBottom: 12 },
+            chatItemActive: { backgroundColor: '#10294F', borderColor: '#2F5FB8' },
+            chatItemTitle: { color: '#fff', fontSize: 18, fontWeight: '700' },
+            chatItemSub: { color: '#9CA3AF', fontSize: 15, marginTop: 2 },
+            memItem: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1A2233', borderRadius: 18, borderWidth: 1, borderColor: '#243049', paddingVertical: 12, paddingHorizontal: 16, marginBottom: 10 },
+            memText: { color: '#E5E7EB', fontSize: 16, flex: 1, marginRight: 10 },
+            idCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#1A2233', borderRadius: 28, borderWidth: 1, borderColor: '#243049', padding: 18 },
+            idIcon: { width: 56, height: 56, borderRadius: 18, backgroundColor: '#10294F', alignItems: 'center', justifyContent: 'center' },
+            idLabel: { color: '#9CA3AF', fontSize: 14 },
+            idValue: { color: '#fff', fontSize: 17, fontWeight: '700', marginTop: 2 },
+            note: { color: '#6B7280', fontSize: 15, lineHeight: 22, marginVertical: 16 },
+            infoRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: '#1E2A44' },
+            infoText: { color: '#E5E7EB', fontSize: 16, marginLeft: 14, flex: 1 },
+            danger: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: '#F87171', borderRadius: 28, paddingVertical: 16, marginTop: 24 },
+            dangerText: { color: '#F87171', fontSize: 17, fontWeight: '700', marginLeft: 8 },
+            center: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', padding: 24 },
+            dialog: { backgroundColor: '#0C1424', borderRadius: 24, padding: 20, borderWidth: 1, borderColor: '#243049' },
+            dialogTitle: { color: '#fff', fontSize: 20, fontWeight: '700', marginBottom: 14 },
+            dialogInput: { color: '#fff', fontSize: 16, backgroundColor: '#1A2233', borderRadius: 14, paddingHorizontal: 14, paddingVertical: 12 },
+          });
+          EOF_FILE
+          cat > .gitignore <<'EOF_FILE'
+          node_modules/
+          android/
+          EOF_FILE
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      # Кэш ускоряет все сборки, кроме первой
+      - name: Кэш npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('package.json') }}
+          restore-keys: npm-${{ runner.os }}-
+
+      - name: Кэш Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('package.json') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Установка зависимостей
+        run: npm install --no-audit --no-fund --prefer-offline
+
+      - name: Генерация Android-проекта
+        run: npx expo prebuild --platform android --no-install --clean
+
+      - name: Сборка Release APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          {
+            echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
+            echo "org.gradle.parallel=true"
+            echo "org.gradle.caching=true"
+          } >> gradle.properties
+          ./gradlew assembleRelease --no-daemon --build-cache -PreactNativeArchitectures=arm64-v8a
+
+      - name: Загрузка APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Eclips-AI-release-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
